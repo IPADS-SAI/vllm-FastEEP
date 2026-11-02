@@ -69,6 +69,18 @@ migration. ElasticEP numbers come from the same setup for reference.
 
 ---
 
+## Demo
+
+A scale event on one 8×H20 node, recorded for
+[upstream PR #44994](https://github.com/vllm-project/vllm/pull/44994): the
+server keeps serving while the active EP group shrinks and grows.
+
+<video src="https://github.com/user-attachments/assets/92b5b687-0666-409d-a010-ebb898f47771" controls muted playsinline></video>
+
+If the player does not load, [open the video directly](https://github.com/user-attachments/assets/92b5b687-0666-409d-a010-ebb898f47771).
+
+---
+
 ## How it works
 
 ```mermaid
