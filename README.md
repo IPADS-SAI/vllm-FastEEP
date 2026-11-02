@@ -12,7 +12,6 @@ turning a 30–50 s EP rebuild into a **2–4 s** transition.
 [![PR](https://img.shields.io/badge/upstream%20PR-vllm%2344994-2ea44f)](https://github.com/vllm-project/vllm/pull/44994)
 [![Paper](https://img.shields.io/badge/arXiv-2610.18451-b31b1b)](https://arxiv.org/abs/2610.18451)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11%2B-3776ab)](pyproject.toml)
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [Feature docs](docs/features/flash_ep_scaling.md) · [Upstream tracking](UPSTREAM.md)
 
@@ -32,10 +31,6 @@ VLLM_SERVER_DEV_MODE=1 vllm serve <model> \
 # 2. Resize the active group while it serves. No restart, no reload.
 curl -X POST localhost:8005/flash_epscale -d '{"ep_size": 4, "level": 2}'
 ```
-
-The server still holds 8 EP ranks in its process group, but only 4 are active
-and only 4 are resident. Scaling back to 8 wakes the sleeping ranks instead of
-rebuilding them.
 
 ---
 
@@ -63,9 +58,6 @@ scale event then only reconfigures the active subset:
 | Comm state | rebuilt | parent group retained, `ncclCommSplit` for the active subset |
 | Range | beyond the startup size | within the startup size |
 | Scale latency (8×H20, measured) | 6.8–50.6 s | **1.8–3.9 s** |
-
-The two paths are complementary: FastEEP handles the common "rebalance within
-this node" case, ElasticEP handles "grow past what I started with".
 
 ---
 
@@ -157,33 +149,6 @@ Two invariants make this safe:
   transfers are distributed across active senders, and KV cache stays unmapped
   on ranks that remain asleep.
 
-### Memory modes
-
-| Mode | Request | What is reclaimed | CPU cost | Typical use |
-| --- | --- | --- | --- | --- |
-| **L1** | `"level": 1` (default) | GPU pages of the tagged allocations, contents backed up to pinned CPU | model weights + KV cache per sleeping rank | few, predictable scale events; fast wake |
-| **L2** | `"level": 2` | GPU pages, contents **discarded** | only the graph-pool backup | CPU-constrained hosts; wake refills weights from active peers over NIXL |
-
-L2 requires `--eplb-config.communicator pynccl` with
-`--eplb-config.use_async false` in the tested configuration, because the peer
-refill uses synchronous PyNCCL transfers.
-
----
-
-## Requirements
-
-| | Requirement |
-| --- | --- |
-| Hardware | Single node, homogeneous GPUs. Validated on 8×H20-96G; CUDA + NVLink class interconnect. |
-| Parallelism | `TP=1`, DP == EP world size, `--data-parallel-backend ray`. Multi-node and TP are **not** validated. |
-| Model | EPLB-managed MoE (DeepSeek-V2-Lite and Qwen3-30B-A3B tested). |
-| vLLM flags | `--enable-sleep-mode`, `--enable-expert-parallel`, `--enable-eplb`, `--enable-elastic-ep`, `--all2all-backend nixl_ep` |
-| Runtime | Ray, NIXL (`nixl-cu13==1.0.1` tested), PyNCCL for expert-weight migration |
-| Env | `VLLM_SERVER_DEV_MODE=1` — `/flash_epscale` is a dev endpoint and is not registered without it |
-
-At `--gpu-memory-utilization 0.45` on 96 GB cards a 30B-A3B class MoE leaves
-enough headroom for the wake path; on tighter memory budgets, prefer L2.
-
 ---
 
 ## Installation
@@ -191,7 +156,7 @@ enough headroom for the wake path; on tighter memory budgets, prefer L2.
 FastEEP is a vLLM source tree. Install it like vLLM, editable, from this repo:
 
 ```bash
-git clone https://github.com/<you>/Vllm-FastEEP.git
+git clone https://github.com/nanookfyf/Vllm-FastEEP
 cd Vllm-FastEEP
 
 uv venv --python 3.12 --seed --managed-python
@@ -273,41 +238,6 @@ curl http://localhost:8005/v1/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"<served-model-name>","prompt":"Explain expert parallelism in one sentence.","max_tokens":32}'
 ```
-
-Send the same prompt before and after a transition and diff the outputs; the
-only expected difference is sampling noise.
-
-### 5. Drive it from Python
-
-```python
-import time
-import requests
-
-
-def scale(ep_size: int, level: int = 1) -> dict:
-    t0 = time.perf_counter()
-    resp = requests.post(
-        "http://localhost:8005/flash_epscale",
-        json={"ep_size": ep_size, "level": level},
-        timeout=600,
-    )
-    resp.raise_for_status()
-    body = resp.json()
-    print(
-        f"{body['action']:<10} active={body['active_ep_size']} "
-        f"sleeping={body['sleeping_ep_ranks']} "
-        f"total={body['timing_ms']['total']:.0f}ms "
-        f"(wall {1000 * (time.perf_counter() - t0):.0f}ms)"
-    )
-    return body
-
-
-scale(4, level=2)   # shrink for the night
-scale(8)            # burst back in the morning
-```
-
-`examples/fasteep/` contains a small wrapper (`serve.sh`, `demo.py`) for the
-same flow.
 
 ---
 
@@ -421,30 +351,6 @@ alongside any benchmark you publish.
 
 ---
 
-## What changed relative to upstream vLLM
-
-51 files, +5142 / −348.
-
-| Area | Path | Change |
-| --- | --- | --- |
-| Dev API | `vllm/entrypoints/serve/flash_epscale/api_router.py` | `/flash_epscale` orchestration: reroute, drain, pause window, sleep/wake RPCs, timing, rollback. |
-| Sleep API | `vllm/entrypoints/serve/dev/sleep/api_router.py` | Sleep/wake by EP rank + tag; per-rank tag bookkeeping. |
-| EPLB | `vllm/distributed/eplb/{eplb_state,eplb_communicator}.py` | Logical sleep state, remap during resize, peer masking. |
-| Communicators | `vllm/distributed/device_communicators/{pynccl,pynccl_wrapper,cuda_wrapper,cuda_communicator,all2all}.py` | `ncclCommSplit`, suspend/resume, NIXL connect/disconnect/destroy. |
-| GPU allocator | `vllm/device_allocator/cumem.py`, `vllm/platforms/cuda.py` | `graphs` pool, tagged pools, CPU backup/restore at fixed vaddrs. |
-| Weights | `vllm/distributed/elastic_ep/peer_weight_transfer.py` | L2 dense-weight P2P refill; shared-weight distribution across senders. |
-| Runner / worker | `vllm/v1/worker/{gpu_worker,gpu_model_runner,sleep_tags}.py`, `vllm/v1/worker/gpu/*` | Sleeping ranks skip forward; tag split; V2 runner and EPLB utilities. |
-| Front end | `vllm/v1/engine/{async_llm,core,core_client,output_processor}.py`, `vllm/engine/protocol.py` | Active-DP routing, in-flight reroute, drain RPCs. |
-| Tests | `tests/entrypoints/serve/test_flash_epscale.py` (531 lines) and 10 more | Endpoint, communicator, allocator, EPLB and worker coverage. |
-| Docs | `docs/features/flash_ep_scaling.md`, `docs/usage/security.md` | Feature specification; the new dev endpoints added to the security notes. |
-
-The fork is otherwise a faithful snapshot of upstream `fcae5c9`, with one
-exception: the upstream PR carried a stray root-level `package.json` /
-`package-lock.json` (a local editor dependency) and `repro_nccl_buf.py`. The
-former were removed and the latter moved to `tools/fasteep/repro_nccl_buf.py`.
-
----
-
 ## Testing
 
 The FastEEP tests need 8 GPUs and a CUDA build.
@@ -527,24 +433,6 @@ be rebased onto a newer vLLM with `git apply -3`.
 
 ---
 
-## Troubleshooting
-
-| Symptom | Likely cause / fix |
-| --- | --- |
-| `404` on `/flash_epscale` | `VLLM_SERVER_DEV_MODE=1` is not exported in the server's environment. |
-| `400 ep_size must be in [1, N]` | Requested size exceeds the startup DP/EP size. Start bigger; FastEEP cannot grow past startup. |
-| `500 ... unexpected EP sleep state` | A worker disagrees about sleep state, usually after a call that failed midway. Inspect the server log, then call `/flash_epscale` with the last known-good size to reconcile. |
-| First scale takes ~20 s | L1 pinned-buffer allocation. Pre-warm with one scale-down/scale-up cycle after startup, then measure. |
-| Wake stalls or `drain` times out | Long-running requests hold the shrinking ranks; raise `drain_timeout`, or lower `--max-num-seqs` so drains finish faster. |
-| UCX errors after repeated L2 wake | Known with NIXL 1.0.1 weight migration; use `--eplb-config.communicator pynccl --eplb-config.use_async false`. |
-| No memory reclaimed on sleep | Graph reclaim needs `enable_cumem_allocator=True`; weight/KV reclaim needs the tags to actually cover those allocations. Check the `sleep` timing and the worker log. |
-| OOM on scale-up | Not enough headroom to reallocate. Lower `--gpu-memory-utilization`, use L2, or raise `VLLM_FLASH_EPSCALE_SUSPEND_MAX_DP`. |
-
-Enable debug logging with `VLLM_LOGGING_LEVEL=DEBUG`; the endpoint logs
-`flash_epscale <action> timing_ms=...` plus per-step failures.
-
----
-
 ## Citation
 
 ```bibtex
@@ -567,7 +455,3 @@ Enable debug logging with `VLLM_LOGGING_LEVEL=DEBUG`; the endpoint logs
 - [NIXL](https://github.com/ai-dynamo/nixl) for the transfer backend.
 - FastEEP was implemented by Yunfei Feng, Jingkai He, Shiqi Liu, Cheng Zhang,
   Dong Du and Erhu Feng (Shanghai Jiao Tong University).
-
-## License
-
-Apache-2.0, inherited from vLLM. See [`LICENSE`](LICENSE).
