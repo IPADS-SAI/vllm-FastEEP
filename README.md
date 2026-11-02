@@ -151,8 +151,8 @@ Two invariants make this safe:
 FastEEP is a vLLM source tree. Install it like vLLM, editable, from this repo:
 
 ```bash
-git clone https://github.com/nanookfyf/Vllm-FastEEP
-cd Vllm-FastEEP
+git clone https://github.com/IPADS-SAI/vllm-FastEEP
+cd vllm-FastEEP
 
 uv venv --python 3.12 --seed --managed-python
 source .venv/bin/activate
