@@ -17,23 +17,6 @@ turning a 30–50 s EP rebuild into a **2–4 s** transition.
 
 </div>
 
----
-
-## TL;DR
-
-```bash
-# 1. Start serving at the MAXIMUM EP size you may ever need.
-VLLM_SERVER_DEV_MODE=1 vllm serve <model> \
-    --enable-sleep-mode --enable-expert-parallel --enable-eplb --enable-elastic-ep \
-    --all2all-backend nixl_ep --data-parallel-backend ray \
-    --data-parallel-size 8 --data-parallel-size-local 8
-
-# 2. Resize the active group while it serves. No restart, no reload.
-curl -X POST localhost:8005/flash_epscale -d '{"ep_size": 4, "level": 2}'
-```
-
----
-
 ## Why FastEEP?
 
 MoE inference is bursty. Expert parallelism (EP) shards experts across GPUs, so
@@ -200,7 +183,7 @@ export VLLM_SERVER_DEV_MODE=1
 export VLLM_FLASH_EPSCALE_SUSPEND_MAX_DP=1     # reclaim the parent comm's GPU memory
 export VLLM_FLASH_EPSCALE_SKIP_NIXL_TEARDOWN=0 # tear down NIXL buffers on sleepers
 
-MODEL=/path/to/DeepSeek-V2-Lite   # or Qwen3-30B-A3B
+MODEL=/path/to/DeepSeek-V2-Lite  
 
 vllm serve "$MODEL" \
     --trust-remote-code --enable-sleep-mode \
